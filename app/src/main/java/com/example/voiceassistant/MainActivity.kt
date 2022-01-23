@@ -5,12 +5,22 @@ import android.os.Bundle
 import android.util.Log
 import android.view.Menu
 import android.view.MenuItem
+import android.view.View
+import android.view.inputmethod.EditorInfo
 import android.widget.ListView
 import android.widget.ProgressBar
 import android.widget.SimpleAdapter
 import com.google.android.material.appbar.MaterialToolbar
 import com.google.android.material.floatingactionbutton.FloatingActionButton
+import com.google.android.material.snackbar.Snackbar
 import com.google.android.material.textfield.TextInputEditText
+import com.wolfram.alpha.WAEngine
+import com.wolfram.alpha.WAPlainText
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import java.lang.StringBuilder
 
 class MainActivity : AppCompatActivity() {
 
@@ -22,30 +32,16 @@ class MainActivity : AppCompatActivity() {
 
     lateinit var progressBar: ProgressBar //Переменная для прогресс-бара
 
-    val pods = mutableListOf<HashMap<String, String>>( //Изменяемый список со словарями типа "Ключ-значение" (текстового типа)
-        HashMap<String, String>().apply {
-            put("Title","Title 1") //Добавление элементов в словарь
-            put("Content", "Content 1")
-        },
-        HashMap<String, String>().apply {
-            put("Title","Title 2") //Добавление элементов в словарь
-            put("Content", "Content 2")
-        },
-        HashMap<String, String>().apply {
-            put("Title","Title 3") //Добавление элементов в словарь
-            put("Content", "Content 3")
-        },
-        HashMap<String, String>().apply {
-            put("Title","Title 4") //Добавление элементов в словарь
-            put("Content", "Content 4")
-        }
-    )
+    lateinit var waEngine: WAEngine //Создание объекта Wolfram Engine
+
+    val pods = mutableListOf<HashMap<String, String>>()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
 
-        initView() //Вызов метода инициализации
+        initView() //Вызов метода инициализации View
+        initWolframEngine() //Вызов метода инизиализации Wolfram Engine
     }
 
     //Инициализация для объектов программы
@@ -54,6 +50,17 @@ class MainActivity : AppCompatActivity() {
         setSupportActionBar(toolbar) //Включение поддержки меню
 
         requestInput = findViewById(R.id.text_input_edit) //Текстовый запрос
+        requestInput.setOnEditorActionListener { v, actionId, event ->
+            if (actionId == EditorInfo.IME_ACTION_DONE){
+                pods.clear()
+                podsAdapter.notifyDataSetChanged()
+
+                val question = requestInput.text.toString()
+                askWolfram(question)
+            }
+
+            return@setOnEditorActionListener false
+        }
 
         val podsList: ListView = findViewById(R.id.pods_list) //Список резульататов поиска
 
@@ -90,10 +97,74 @@ class MainActivity : AppCompatActivity() {
         }
         when(item.itemId) {
             R.id.action_clear -> { //Когда выбрана кнопка "Очистить"
-                Log.d(TAG, "action_clear") //Логируем нажатие кнопки "Очистить"
+                requestInput.text?.clear()
+                pods.clear()
+                podsAdapter.notifyDataSetChanged()
                 return true
             }
         }
         return super.onOptionsItemSelected(item)
+    }
+
+    fun initWolframEngine(){ //Инициализцаия Wolfram Alpha
+        waEngine = WAEngine().apply {
+            appID = "3QH559-HW8E8UWK7Q" //Передаем ключ
+            addFormat("plaintext") //Указываем формат "плоский" текст
+        }
+    }
+
+    fun showSnackbar(message: String){ //Метод вызова снэкбара
+        Snackbar.make(findViewById(android.R.id.content), message, Snackbar.LENGTH_INDEFINITE).apply { //Указываем, что находится в элементе Content, выводит message, длится бесконечно
+            setAction(android.R.string.ok) { //Добавляем действие на кнопку OK
+                dismiss() //Закрытие снэкбара
+            }
+            show() //Отображение снэкбара
+        }
+    }
+
+    fun askWolfram(request: String){ //Запрос к Wolfram Alpha
+        progressBar.visibility = View.VISIBLE //Отображаем прогрессбар
+        CoroutineScope(Dispatchers.IO).launch { //Запускаем второстепенный поток IO
+            val query = waEngine.createQuery().apply { input = request } //Создаем запрос со входным значением request
+            runCatching {
+                waEngine.performQuery(query) //Отправляем запрос
+            }.onSuccess { result ->
+                withContext(Dispatchers.Main) {
+                    progressBar.visibility = View.GONE //Скрываем прогрессбар
+                    if (result.isError){ //Если все-таки ошибка
+                        showSnackbar(result.errorMessage) //Выводим сообщение ошибки
+                        return@withContext //ЗАканчиваем выполнение функции
+                    }
+                    if (!result.isSuccess){ //Если не успех
+                        requestInput.error = getString(R.string.error_do_not_understand) //Возвращаем сообщение "ЧТо-то пошло не так"
+                        return@withContext //Заканчиваем выполнение функции
+                    }
+
+                    for (pod in result.pods){ //Перебираем поды
+                        if (pod.isError) continue //Если ошибка в поде перескакиваем на следующую итерацию
+                        val content = StringBuilder() //Инициализируем переменную для контента
+
+                        for(subpod in pod.subpods){ //Перебираем сабподы в подах
+                            for(element in subpod.contents){ //Перебираем каждый элемент в сабподе
+                                if (element is WAPlainText){ //Если элемент является текстом
+                                    content.append(element.text) //Добавляем к контенту текстовое содержимое элемента
+                                }
+                            }
+                        }
+                        pods.add(0, HashMap<String, String>().apply { //Добавляем новый результат в список подов
+                            put("Title", pod.title) //Вставляем загаловок
+                            put("Content", content.toString()) //Вставляем контент
+                        })
+                    }
+
+                    podsAdapter.notifyDataSetChanged() //Пересобираем адаптер
+                }
+            }.onFailure { t -> //Если ошибка
+                withContext(Dispatchers.Main) { //Переключаемся на основной поток
+                    progressBar.visibility = View.GONE //Убираем прогрессбар
+                    showSnackbar(t.message ?: getString(R.string.error_something_went_wrong)) //Выводим сообщение об ошибке или нашу ошибку
+                }
+            }
+        }
     }
 }
